@@ -52,7 +52,9 @@ def bootstrap_user_via_root(ip: str, config: dict) -> bool:
         f"grep -qxF '{pub_key}' /home/{username}/.ssh/authorized_keys 2>/dev/null || "
         f"echo '{pub_key}' >> /home/{username}/.ssh/authorized_keys && "
         f"chmod 600 /home/{username}/.ssh/authorized_keys && "
-        f"chown -R {username}:{username} /home/{username}/.ssh"
+        f"chown -R {username}:{username} /home/{username}/.ssh && "
+        f"grep -q 'HOME/.local/bin' /home/{username}/.bashrc 2>/dev/null || "
+        f"echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> /home/{username}/.bashrc"
     )
 
     # Wait for root SSH to be reachable, then bootstrap
@@ -334,6 +336,15 @@ def ssh(name: str):
             click.echo(f"Try again in a minute: rage-room-remote ssh {name}", err=True)
             sys.exit(1)
 
+    # Check if cloud-init is still running and show a status message on login
+    cloud_init_check = (
+        "if command -v cloud-init >/dev/null 2>&1 && "
+        "cloud-init status 2>/dev/null | grep -q 'running'; then "
+        "echo '\\n\\033[33m⏳ Cloud-init is still installing packages (claude, node, docker, etc.)\\033[0m'; "
+        "echo '\\033[33m   Run: cloud-init status  to check progress\\033[0m\\n'; "
+        "fi; exec $SHELL -l"
+    )
+
     # Open the interactive session
     subprocess.run(
         [
@@ -341,6 +352,7 @@ def ssh(name: str):
             "-o", "StrictHostKeyChecking=accept-new",
             "-i", identity,
             f"{username}@{ip}",
+            "-t", cloud_init_check,
         ],
     )
 
