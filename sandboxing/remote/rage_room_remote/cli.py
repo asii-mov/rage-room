@@ -31,6 +31,54 @@ def get_client(config: dict) -> DOClient:
     return DOClient(config["digitalocean_token"])
 
 
+def bootstrap_user_via_root(ip: str, config: dict) -> bool:
+    """SSH as root to create the user and add SSH keys immediately.
+
+    DO injects root SSH keys at the hypervisor level (instant), but cloud-init
+    takes minutes to start. This bootstraps the user account without waiting
+    for cloud-init to reach the users-groups module.
+    """
+    username = config.get("username", "dev")
+    ssh_key_path = Path(config["ssh_public_key"]).expanduser()
+    identity = str(ssh_key_path).replace(".pub", "")
+    pub_key = ssh_key_path.read_text().strip()
+
+    setup_script = (
+        f"id -u {username} &>/dev/null || useradd -m -s /bin/bash -G sudo {username} && "
+        f"echo '{username} ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/{username} && "
+        f"chmod 440 /etc/sudoers.d/{username} && "
+        f"mkdir -p /home/{username}/.ssh && "
+        f"chmod 700 /home/{username}/.ssh && "
+        f"grep -qxF '{pub_key}' /home/{username}/.ssh/authorized_keys 2>/dev/null || "
+        f"echo '{pub_key}' >> /home/{username}/.ssh/authorized_keys && "
+        f"chmod 600 /home/{username}/.ssh/authorized_keys && "
+        f"chown -R {username}:{username} /home/{username}/.ssh"
+    )
+
+    # Wait for root SSH to be reachable, then bootstrap
+    for attempt in range(18):
+        result = subprocess.run(
+            [
+                "ssh",
+                "-o", "StrictHostKeyChecking=accept-new",
+                "-o", "ConnectTimeout=5",
+                "-o", "BatchMode=yes",
+                "-i", identity,
+                f"root@{ip}",
+                setup_script,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return True
+        if attempt < 17:
+            click.echo(f"  Waiting for droplet SSH... ({attempt + 1}/18)")
+            time.sleep(5)
+
+    return False
+
+
 def render_cloud_init(config: dict) -> str:
     """Render cloud-init template with config values."""
     template_path = Path(__file__).parent / "templates" / "cloud-init.yaml"
@@ -190,15 +238,24 @@ def create(name: str, region: str | None, size: str | None):
             break
         time.sleep(5)
 
-    if ip:
+    if not ip:
+        click.echo(f"\nDroplet created (ID: {droplet_id}) but IP not yet assigned.")
+        click.echo("Check status with: rage-room-remote list")
+        return
+
+    # Bootstrap user via root SSH (instant, no cloud-init wait)
+    click.echo(f"Setting up user '{config['username']}'...")
+    if bootstrap_user_via_root(ip, config):
         click.echo(f"\nSandbox '{name}' ready!")
         click.echo(f"  IP:  {ip}")
         click.echo(f"  SSH: ssh {config['username']}@{ip}")
+        click.echo("  Note: cloud-init is still installing packages in the background")
         if config.get("tailscale_auth_key"):
-            click.echo("  Tailscale: will auto-join once cloud-init completes (~2-3 min)")
+            click.echo("  Tailscale: will auto-join once cloud-init completes")
     else:
-        click.echo(f"\nDroplet created (ID: {droplet_id}) but IP not yet assigned.")
-        click.echo("Check status with: rage-room-remote list")
+        click.echo(f"\nDroplet created but user setup failed.", err=True)
+        click.echo(f"  IP:  {ip}")
+        click.echo(f"  Wait for cloud-init and try: rage-room-remote ssh {name}")
 
 
 @cli.command("list")
@@ -255,6 +312,29 @@ def ssh(name: str):
     identity = str(ssh_key).replace(".pub", "")
 
     click.echo(f"Connecting to {name} ({ip})...")
+
+    # Quick check: can we SSH as the user already?
+    probe = subprocess.run(
+        [
+            "ssh",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=5",
+            "-o", "BatchMode=yes",
+            "-i", identity,
+            f"{username}@{ip}",
+            "true",
+        ],
+        capture_output=True,
+    )
+    if probe.returncode != 0:
+        # User not set up yet — bootstrap via root
+        click.echo("  Setting up user account...")
+        if not bootstrap_user_via_root(ip, config):
+            click.echo("Could not bootstrap user. The droplet may still be booting.", err=True)
+            click.echo(f"Try again in a minute: rage-room-remote ssh {name}", err=True)
+            sys.exit(1)
+
+    # Open the interactive session
     subprocess.run(
         [
             "ssh",

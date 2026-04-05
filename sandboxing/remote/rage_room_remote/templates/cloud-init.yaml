@@ -1,6 +1,21 @@
 #cloud-config
 # Rage Room Sandbox - VM provisioning template
 
+# ========================================
+# 0. Create user early (before package ops)
+# ========================================
+users:
+  - default
+  - name: {{ username }}
+    groups: sudo
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: true
+    ssh_authorized_keys:
+{% for key in ssh_keys %}
+      - {{ key }}
+{% endfor %}
+
 package_update: true
 package_upgrade: true
 
@@ -141,18 +156,9 @@ write_files:
 
 runcmd:
   # ========================================
-  # 1. Create user
+  # 1. Switch user shell to zsh (now that it's installed)
   # ========================================
-  - useradd -m -s /bin/zsh -G sudo {{ username }}
-  - echo '{{ username }} ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/{{ username }}
-  - chmod 440 /etc/sudoers.d/{{ username }}
-  - mkdir -p /home/{{ username }}/.ssh
-  - chmod 700 /home/{{ username }}/.ssh
-{% for key in ssh_keys %}
-  - echo '{{ key }}' >> /home/{{ username }}/.ssh/authorized_keys
-{% endfor %}
-  - chmod 600 /home/{{ username }}/.ssh/authorized_keys
-  - chown -R {{ username }}:{{ username }} /home/{{ username }}
+  - command -v zsh && chsh -s /bin/zsh {{ username }} || echo "zsh not found, skipping shell change"
 
   # ========================================
   # 2. Harden UFW firewall
