@@ -1,0 +1,263 @@
+#cloud-config
+# Rage Room Sandbox - VM provisioning template
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - ufw
+  - zsh
+  - git
+  - curl
+  - build-essential
+  - ca-certificates
+  - gnupg
+  - jq
+  - tmux
+  - ripgrep
+  - fd-find
+  - unattended-upgrades
+  - fail2ban
+
+write_files:
+  # Org Claude Code settings
+  - path: /opt/rage-room/settings.json
+    permissions: '0644'
+    content: |
+      {
+        "permissions": {
+          "deny": [
+            "Read(.env*)",
+            "Read(credentials.json)",
+            "Read(**/secrets/**)",
+            "Read(**/*.pem)",
+            "Read(**/*.key)",
+            "Edit(.env*)",
+            "Edit(credentials.json)",
+            "Edit(**/secrets/**)",
+            "Edit(**/*.pem)",
+            "Edit(**/*.key)"
+          ]
+        },
+        "env": {}
+      }
+
+  # Org CLAUDE.md
+  - path: /opt/rage-room/CLAUDE.md
+    permissions: '0644'
+    content: |
+      # Org Coding Standards
+      - Never commit secrets, API keys, passwords, or tokens to source control
+      - Do not read or modify .env, credential files, or private keys
+      - Write clear, minimal code — avoid over-engineering
+      - Follow existing patterns and conventions in the codebase
+      - Add tests for new functionality
+
+  # Org Codex config
+  - path: /opt/rage-room/codex-config.toml
+    permissions: '0644'
+    content: |
+      # Org baseline Codex CLI configuration
+      [approvals]
+      mode = "suggest"
+
+      [sandbox]
+      mode = "standard"
+
+      [shell_environment]
+      inherit = "core"
+      excludes = [
+          "ANTHROPIC_API_KEY",
+          "OPENAI_API_KEY",
+          "AWS_SECRET_ACCESS_KEY",
+          "AWS_SESSION_TOKEN",
+      ]
+
+  # Supply-chain hardening: npm
+  - path: /opt/rage-room/.npmrc
+    permissions: '0644'
+    content: |
+      ignore-scripts=true
+      save-exact=true
+      prefer-binary=true
+      min-release-age=7
+
+  # Supply-chain hardening: uv (Python)
+  - path: /opt/rage-room/uv.toml
+    permissions: '0644'
+    content: |
+      exclude-newer = "7 days"
+
+  # Default .zshrc to skip first-run wizard
+  - path: /etc/skel/.zshrc
+    permissions: '0644'
+    content: |
+      # Rage Room sandbox defaults
+      export EDITOR=vim
+      export LANG=en_US.UTF-8
+      export TERM=xterm-256color
+      export PATH="$HOME/.local/bin:$PATH"
+
+      # Key bindings (fixes backspace/delete over SSH)
+      bindkey '^?' backward-delete-char
+      bindkey '^H' backward-delete-char
+      bindkey '^[[3~' delete-char
+      bindkey '^[[H' beginning-of-line
+      bindkey '^[[F' end-of-line
+      bindkey '^[[1;5C' forward-word
+      bindkey '^[[1;5D' backward-word
+
+      autoload -Uz compinit && compinit
+      setopt histignorealldups sharehistory
+      HISTSIZE=10000
+      SAVEHIST=10000
+      HISTFILE=~/.zsh_history
+
+  # Hardened SSH config
+  - path: /etc/ssh/sshd_config.d/hardened.conf
+    permissions: '0644'
+    content: |
+      PermitRootLogin prohibit-password
+      PasswordAuthentication no
+      ChallengeResponseAuthentication no
+      X11Forwarding no
+      AllowAgentForwarding no
+      MaxAuthTries 3
+      LoginGraceTime 20
+      ClientAliveInterval 300
+      ClientAliveCountMax 2
+
+  # fail2ban SSH jail
+  - path: /etc/fail2ban/jail.local
+    permissions: '0644'
+    content: |
+      [sshd]
+      enabled = true
+      port = ssh
+      filter = sshd
+      maxretry = 5
+      bantime = 3600
+      findtime = 600
+
+runcmd:
+  # ========================================
+  # 1. Create user
+  # ========================================
+  - useradd -m -s /bin/zsh -G sudo {{ username }}
+  - echo '{{ username }} ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/{{ username }}
+  - chmod 440 /etc/sudoers.d/{{ username }}
+  - mkdir -p /home/{{ username }}/.ssh
+  - chmod 700 /home/{{ username }}/.ssh
+{% for key in ssh_keys %}
+  - echo '{{ key }}' >> /home/{{ username }}/.ssh/authorized_keys
+{% endfor %}
+  - chmod 600 /home/{{ username }}/.ssh/authorized_keys
+  - chown -R {{ username }}:{{ username }} /home/{{ username }}
+
+  # ========================================
+  # 2. Harden UFW firewall
+  # ========================================
+  - ufw default deny incoming
+  - ufw default deny forward
+  - ufw default allow outgoing
+  - ufw limit ssh comment 'Rate-limited SSH'
+  - ufw --force enable
+
+  # ========================================
+  # 3. Enable security services
+  # ========================================
+  - systemctl enable fail2ban
+  - systemctl start fail2ban
+  - systemctl enable unattended-upgrades
+  - dpkg-reconfigure -plow unattended-upgrades
+
+  # Restart SSH with hardened config
+  - systemctl restart sshd
+
+  # ========================================
+  # Supply-chain hardening
+  # ========================================
+  - |
+    # npm hardening
+    cp /opt/rage-room/.npmrc /home/{{ username }}/.npmrc
+    chown {{ username }}:{{ username }} /home/{{ username }}/.npmrc
+
+    # uv/Python hardening
+    mkdir -p /home/{{ username }}/.config/uv
+    cp /opt/rage-room/uv.toml /home/{{ username }}/.config/uv/uv.toml
+    chown -R {{ username }}:{{ username }} /home/{{ username }}/.config
+
+    # Go hardening (added to shell profile)
+    echo 'export GOPROXY="proxy.golang.org,off"' >> /home/{{ username }}/.profile
+    echo 'export GOSUMDB="sum.golang.org"' >> /home/{{ username }}/.profile
+
+  # ========================================
+  # 4. Install Docker
+  # ========================================
+  - curl -fsSL https://get.docker.com | sh
+  - usermod -aG docker {{ username }}
+
+  # ========================================
+  # 5. Install Node.js 22 (system-wide, for Codex CLI)
+  # ========================================
+  - curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  - apt-get install -y nodejs
+
+  # ========================================
+  # 6. Install Claude Code
+  # ========================================
+  - su {{ username }} -c 'curl -fsSL https://claude.ai/install.sh | bash'
+
+  # ========================================
+  # 7. Install Codex CLI
+  # ========================================
+  - npm install -g @openai/codex
+
+  # ========================================
+  # 8. Apply org configs
+  # ========================================
+  - |
+    # Claude Code config
+    mkdir -p /home/{{ username }}/.claude
+    cp /opt/rage-room/settings.json /home/{{ username }}/.claude/settings.json
+    cp /opt/rage-room/CLAUDE.md /home/{{ username }}/.claude/CLAUDE.md
+
+    # Codex config
+    mkdir -p /home/{{ username }}/.codex
+    cp /opt/rage-room/codex-config.toml /home/{{ username }}/.codex/config.toml
+
+    # Fix ownership
+    chown -R {{ username }}:{{ username }} /home/{{ username }}/.claude
+    chown -R {{ username }}:{{ username }} /home/{{ username }}/.codex
+
+  # ========================================
+  # 9. Configure git
+  # ========================================
+  - su {{ username }} -c "git config --global user.name '{{ full_name }}'"
+  - su {{ username }} -c "git config --global user.email '{{ email }}'"
+
+{% if tailscale_auth_key %}
+  # ========================================
+  # 10. Tailscale VPN
+  # ========================================
+  - curl -fsSL https://tailscale.com/install.sh | sh
+  - tailscale up --authkey={{ tailscale_auth_key }} --ssh
+
+  # Lock inbound to Tailscale only (outbound unrestricted)
+  - ufw delete allow ssh 2>/dev/null || true
+  - ufw allow in on tailscale0 comment 'Tailscale VPN'
+  - ufw reload
+{% endif %}
+
+{% if container_image %}
+  # ========================================
+  # 11. Pull container image (optional)
+  # ========================================
+  - docker pull {{ container_image }}
+{% endif %}
+
+  # ========================================
+  # Done
+  # ========================================
+  - echo "RAGE_ROOM_SANDBOX_READY" > /var/log/rage-room-ready
+  - chown {{ username }}:{{ username }} /var/log/rage-room-ready

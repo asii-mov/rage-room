@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(.env*)",
+      "Read(credentials.json)",
+      "Read(**/secrets/**)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Read(**/.aws/credentials)",
+      "Read(**/.gcloud/**)",
+      "Read(**/.azure/**)",
+      "Edit(.env*)",
+      "Edit(credentials.json)",
+      "Edit(**/secrets/**)",
+      "Edit(**/*.pem)",
+      "Edit(**/*.key)"
+    ],
+    "defaultMode": "allowEdits"
+  },
+  "hooks": {
+    "configchange": [
+      {
+        "command": "/bin/bash hooks/configchange.sh",
+        "description": "Alert on unapproved configuration changes"
+      }
+    ]
+  },
+  "env": {}
+}

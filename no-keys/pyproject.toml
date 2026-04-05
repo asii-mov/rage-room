@@ -1,0 +1,26 @@
+[project]
+name = "no-keys"
+version = "2.0.0"
+description = "Secret redaction proxy for AI coding tools"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.9.0",
+    "click>=8.0",
+    "cryptography>=42.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "aiohttp>=3.9.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+no-keys = "redaction.cli:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"

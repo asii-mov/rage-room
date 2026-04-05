@@ -1,0 +1,4 @@
+# Python supply-chain hardening for uv package manager
+# Prevents installing packages published less than 7 days ago
+
+exclude-newer = "7 days"
